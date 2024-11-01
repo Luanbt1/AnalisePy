@@ -1,53 +1,71 @@
-# Importando bibliotecas necessárias
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-from sklearn.metrics import classification_report, confusion_matrix
-from imblearn.over_sampling import SMOTE, RandomOverSampler
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.feature_selection import SelectFromModel
+from imblearn.over_sampling import SMOTE
+from sklearn.ensemble import VotingClassifier
+from xgboost import XGBClassifier
+from sklearn.svm import SVC
+import glob
 
-# 1. Carregar o conjunto de dados
-# Substitua 'caminho_para_o_arquivo.csv' pelo caminho do seu arquivo de dados
-df = pd.read_csv('lbp-test.csv')
+caminho_arquivos = "./datasets/"
 
-# Verificar a estrutura do dataset
-print(df.head())
+# Encontrar e carregar todos os arquivos CSV de treino em um único DataFrame
+arquivos_treino = glob.glob(caminho_arquivos + "lbp-train-fold_*.csv")
+train_df = pd.concat([pd.read_csv(arquivo) for arquivo in arquivos_treino], ignore_index=True)
 
-# Separar a variável alvo (substitua 'class' pelo nome correto da coluna)
-X = df.drop(columns=['class'])
-y = df['class']
+# Carregar os dados de teste
+test_df = pd.read_csv(caminho_arquivos + "lbp-test.csv")
 
-# 2. Tratar o desbalanceamento - escolha uma das opções abaixo
+# Separar features e rótulo nos conjuntos de treino e teste
+X_train = train_df.drop(columns=['class'])
+y_train = train_df['class']
+X_test = test_df.drop(columns=['class'])
+y_test = test_df['class']
 
-# Opção 1: Usar SMOTE ajustando o número de vizinhos
-# smote = SMOTE(random_state=42, k_neighbors=2)
-# X_resampled, y_resampled = smote.fit_resample(X, y)
+# Seleção de características usando RandomForest
+selector = SelectFromModel(RandomForestClassifier(n_estimators=39, random_state=42, n_jobs=-1), threshold="mean")
+selector.fit(X_train, y_train)
+selected_features = X_train.columns[selector.get_support()]
 
-# Opção 2: Usar RandomOverSampler
-oversampler = RandomOverSampler(random_state=42)
-X_resampled, y_resampled = oversampler.fit_resample(X, y)
+# Aplicar seleção de características
+X_train_selected = X_train[selected_features]
+X_test_selected = X_test[selected_features]
 
-# 3. Dividir os dados em treino e teste
-X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.3, random_state=42)
+# SMOTE para balancear as classes no conjunto de treino
+smote = SMOTE(random_state=42, k_neighbors=5)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train_selected, y_train)
 
-# 4. Treinar modelos individuais
-# Random Forest
-rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+# Inicializar e configurar os modelos para Ensemble
+rf_model = RandomForestClassifier(random_state=42, n_jobs=-1)
+xgb_model = XGBClassifier(eval_metric='mlogloss', random_state=42, n_jobs=-1)
+svc_model = SVC(probability=True, random_state=42)
 
-# Gradient Boosting
-gb_model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
-
-# 5. Criar o Ensemble com Voting Classifier
-voting_ensemble = VotingClassifier(
-    estimators=[('rf', rf_model), ('gb', gb_model)],
-    voting='soft'  # 'soft' usa as probabilidades de cada modelo
+# Combinar os modelos com VotingClassifier
+ensemble_model = VotingClassifier(
+    estimators=[
+        ('rf', rf_model),
+        ('xgb', xgb_model),
+        ('svc', svc_model)
+    ], voting='soft', n_jobs=-1
 )
 
-# Treinar o ensemble
-voting_ensemble.fit(X_train, y_train)
+# Hiperparâmetros para ajuste de modelo
+param_grid = {
+    'rf__n_estimators': [100, 200],
+    'xgb__max_depth': [3, 5],
+    'svc__C': [1, 10]
+}
 
-# 6. Fazer previsões e avaliar o desempenho
-y_pred = voting_ensemble.predict(X_test)
+# Usar GridSearchCV para ajuste dos hiperparâmetros
+grid_search = GridSearchCV(ensemble_model, param_grid, scoring='accuracy', cv=3, n_jobs=-1)
+grid_search.fit(X_train_balanced, y_train_balanced)
 
-# Exibir métricas de desempenho
+# Melhor modelo encontrado
+best_model = grid_search.best_estimator_
+
+y_pred = best_model.predict(X_test_selected)
 print("Relatório de Classificação:\n", classification_report(y_test, y_pred))
-print("Matriz de Confusão:\n", confusion_matrix(y_test, y_pred))
+print("Acurácia no conjunto de teste:", accuracy_score(y_test, y_pred))
